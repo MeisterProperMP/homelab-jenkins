@@ -137,7 +137,10 @@ Please provide JENKINS_MASTER_URL parameter
                     }
                     
                     // Remove trailing slash and store validated values
-                    env.JENKINS_MASTER = jenkinsUrl.replaceAll('/+$', '')
+                    def cleanJenkinsUrl = jenkinsUrl.endsWith('/') ? jenkinsUrl[0..-2] : jenkinsUrl
+                    env.JENKINS_MASTER = cleanJenkinsUrl
+                    echo "DEBUG: env.JENKINS_MASTER set to = ${env.JENKINS_MASTER}"
+                    
                     env.TARGET_VM = targetVmIp
                     env.SSH_CRED_ID = sshCredentialId
                     env.SSH_USER_PARAM = sshUser
