@@ -70,10 +70,30 @@ pipeline {
         stage('Validate Parameters') {
             steps {
                 script {
-                    // Check if this is the first run (parameters not yet defined)
-                    def targetVmIp = params.TARGET_VM_IP?.trim() ?: ''
-                    def sshCredentialId = params.SSH_CREDENTIAL_ID?.trim() ?: ''
+                    // Helper function to get non-empty string or default
+                    def getParam = { paramValue, defaultValue ->
+                        def value = paramValue?.toString()?.trim()
+                        return (value && value != 'null' && value != '') ? value : defaultValue
+                    }
                     
+                    // Get parameters with proper defaults
+                    def targetVmIp = getParam(params.TARGET_VM_IP, '')
+                    def sshCredentialId = getParam(params.SSH_CREDENTIAL_ID, '')
+                    def sshUser = getParam(params.SSH_USER, 'root')
+                    def jenkinsUrl = getParam(params.JENKINS_MASTER_URL, 'http://192.168.2.31:8080')
+                    def dockerGid = getParam(params.DOCKER_GID, '988')
+                    def installPath = getParam(params.AGENT_INSTALL_PATH, '/opt/jenkins-agent')
+                    def forceReinstall = params.FORCE_REINSTALL ?: false
+                    
+                    // Fallback to env.JENKINS_URL if still empty
+                    if (!jenkinsUrl || jenkinsUrl == 'http://192.168.2.31:8080') {
+                        def envUrl = getParam(env.JENKINS_URL, null)
+                        if (envUrl) {
+                            jenkinsUrl = envUrl
+                        }
+                    }
+                    
+                    // Validate required parameters
                     if (!targetVmIp) {
                         error """
 ==========================================
@@ -98,11 +118,6 @@ and provide:
                         error "SSH_CREDENTIAL_ID is required! Please create SSH credentials in Jenkins first."
                     }
 
-                    // Determine Jenkins Master URL - handle null/empty cases
-                    def jenkinsUrl = params.JENKINS_MASTER_URL?.trim()
-                    if (!jenkinsUrl) {
-                        jenkinsUrl = env.JENKINS_URL?.trim()
-                    }
                     if (!jenkinsUrl) {
                         error """
 ==========================================
@@ -119,10 +134,10 @@ Please provide JENKINS_MASTER_URL parameter
                     env.JENKINS_MASTER = jenkinsUrl.replaceAll('/+$', '')
                     env.TARGET_VM = targetVmIp
                     env.SSH_CRED_ID = sshCredentialId
-                    env.SSH_USER_PARAM = params.SSH_USER ?: 'root'
-                    env.DOCKER_GID_PARAM = params.DOCKER_GID ?: '988'
-                    env.INSTALL_PATH = params.AGENT_INSTALL_PATH ?: '/opt/jenkins-agent'
-                    env.FORCE_REINSTALL_FLAG = params.FORCE_REINSTALL ? 'true' : 'false'
+                    env.SSH_USER_PARAM = sshUser
+                    env.DOCKER_GID_PARAM = dockerGid
+                    env.INSTALL_PATH = installPath
+                    env.FORCE_REINSTALL_FLAG = forceReinstall ? 'true' : 'false'
 
                     echo """
 ==========================================
