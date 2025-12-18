@@ -143,28 +143,27 @@ Force Reinstall:  ${env.FORCE_REINSTALL_FLAG}
         stage('Check Target VM Connectivity') {
             steps {
                 script {
+                    // Store values in env for shell access (avoids Groovy interpolation)
+                    def forceReinstall = env.FORCE_REINSTALL_FLAG == 'true'
+                    
+                    echo "🔍 Testing SSH connection to ${env.TARGET_VM}..."
+                    
                     withCredentials([sshUserPrivateKey(
                         credentialsId: env.SSH_CRED_ID,
-                        keyFileVariable: 'SSH_KEY',
+                        keyFileVariable: 'SSH_KEY_FILE',
                         usernameVariable: 'SSH_USERNAME'
                     )]) {
-                        def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
-                        def sshUser = env.SSH_USER_PARAM
-                        def targetVm = env.TARGET_VM
-                        def installPath = env.INSTALL_PATH
-                        def forceReinstall = env.FORCE_REINSTALL_FLAG == 'true'
-                        
-                        echo "🔍 Testing SSH connection to ${targetVm}..."
-                        
+                        // Use shell variables to avoid Groovy string interpolation security warning
                         def sshTest = sh(
-                            script: """
-                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} 'echo "SSH OK"'
-                            """,
+                            script: '''
+                                ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+                                    -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" 'echo "SSH OK"'
+                            ''',
                             returnStatus: true
                         )
                         
                         if (sshTest != 0) {
-                            error "❌ Cannot connect to ${targetVm} via SSH. Check credentials and network connectivity."
+                            error "❌ Cannot connect to ${env.TARGET_VM} via SSH. Check credentials and network connectivity."
                         }
                         
                         echo "✅ SSH connection successful"
@@ -173,39 +172,43 @@ Force Reinstall:  ${env.FORCE_REINSTALL_FLAG}
                         echo "🔍 Checking Docker installation..."
                         
                         def dockerCheck = sh(
-                            script: """
-                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} 'docker --version && docker compose version'
-                            """,
+                            script: '''
+                                ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                    -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
+                                    'docker --version && docker compose version'
+                            ''',
                             returnStatus: true
                         )
                         
                         if (dockerCheck != 0) {
-                            error "❌ Docker or Docker Compose not installed on ${targetVm}"
+                            error "❌ Docker or Docker Compose not installed on ${env.TARGET_VM}"
                         }
                         
                         echo "✅ Docker and Docker Compose are installed"
                         
                         // Check if agent already exists
                         def agentExistsCheck = sh(
-                            script: """
-                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
-                                    'test -f ${installPath}/docker-compose.yaml && echo "EXISTS" || echo "NOT_EXISTS"'
-                            """,
+                            script: '''
+                                ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                    -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
+                                    "test -f ${INSTALL_PATH}/docker-compose.yaml && echo EXISTS || echo NOT_EXISTS"
+                            ''',
                             returnStdout: true
                         ).trim()
                         
                         def agentExists = (agentExistsCheck == "EXISTS")
                         
                         if (agentExists && !forceReinstall) {
-                            echo "⚠️ Agent already installed at ${installPath}"
+                            echo "⚠️ Agent already installed at ${env.INSTALL_PATH}"
                             echo "   Use FORCE_REINSTALL=true to reinstall"
                             
                             // Check if agent is running
                             def agentRunning = sh(
-                                script: """
-                                    ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
-                                        'cd ${installPath} && docker compose ps --format json 2>/dev/null | grep -q jenkins-agent && echo "RUNNING"' || true
-                                """,
+                                script: '''
+                                    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                        -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
+                                        "cd ${INSTALL_PATH} && docker compose ps --format json 2>/dev/null | grep -q jenkins-agent && echo RUNNING" || true
+                                ''',
                                 returnStdout: true
                             ).trim()
                             
@@ -299,33 +302,10 @@ Force Reinstall:  ${env.FORCE_REINSTALL_FLAG}
             }
             steps {
                 script {
-                    withCredentials([sshUserPrivateKey(
-                        credentialsId: env.SSH_CRED_ID,
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USERNAME'
-                    )]) {
-                        def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-                        def sshUser = env.SSH_USER_PARAM
-                        def targetVm = env.TARGET_VM
-                        def installPath = env.INSTALL_PATH
-                        def dockerGid = env.DOCKER_GID_PARAM
-                        
-                        echo "📦 Deploying agent files to ${targetVm}:${installPath}..."
-                        
-                        // Create installation directory
-                        sh """
-                            ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
-                                'mkdir -p ${installPath}'
-                        """
-                        
-                        // Stop existing agent if running
-                        sh """
-                            ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
-                                'cd ${installPath} && docker compose down 2>/dev/null || true'
-                        """
-                        
-                        // Create Dockerfile
-                        def dockerfile = '''# Jenkins Inbound Agent with Docker CLI
+                    echo "📦 Deploying agent files to ${env.TARGET_VM}:${env.INSTALL_PATH}..."
+                    
+                    // Create Dockerfile
+                    def dockerfile = '''# Jenkins Inbound Agent with Docker CLI
 FROM jenkins/inbound-agent:latest
 
 USER root
@@ -351,11 +331,11 @@ RUN apt-get update && apt-get install -y \\
 
 USER jenkins
 '''
-                        
-                        writeFile file: 'Dockerfile.agent', text: dockerfile
-                        
-                        // Create docker-compose.yaml with actual values
-                        def composeFile = """services:
+                    
+                    writeFile file: 'Dockerfile.agent', text: dockerfile
+                    
+                    // Create docker-compose.yaml with actual values
+                    def composeFile = """services:
   jenkins-agent:
     build:
       context: .
@@ -366,7 +346,7 @@ USER jenkins
     
     environment:
       - JENKINS_URL=${env.JENKINS_MASTER}
-      - JENKINS_AGENT_NAME=${targetVm}
+      - JENKINS_AGENT_NAME=${env.TARGET_VM}
       - JENKINS_SECRET=${env.AGENT_SECRET}
       - JENKINS_AGENT_WORKDIR=/home/jenkins/agent
     
@@ -375,26 +355,47 @@ USER jenkins
       - /var/run/docker.sock:/var/run/docker.sock
     
     group_add:
-      - "${dockerGid}"
+      - "${env.DOCKER_GID_PARAM}"
 
 volumes:
   agent_workspace:
     name: jenkins_agent_workspace
 """
+                    
+                    writeFile file: 'docker-compose.agent.yaml', text: composeFile
+                    
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: env.SSH_CRED_ID,
+                        keyFileVariable: 'SSH_KEY_FILE',
+                        usernameVariable: 'SSH_USERNAME'
+                    )]) {
+                        // Create installation directory
+                        sh '''
+                            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
+                                "mkdir -p ${INSTALL_PATH}"
+                        '''
                         
-                        writeFile file: 'docker-compose.agent.yaml', text: composeFile
+                        // Stop existing agent if running
+                        sh '''
+                            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
+                                "cd ${INSTALL_PATH} && docker compose down 2>/dev/null || true"
+                        '''
                         
                         // Copy files to target VM
-                        sh """
-                            scp ${sshOpts} -i ${SSH_KEY} Dockerfile.agent ${sshUser}@${targetVm}:${installPath}/Dockerfile
-                            scp ${sshOpts} -i ${SSH_KEY} docker-compose.agent.yaml ${sshUser}@${targetVm}:${installPath}/docker-compose.yaml
-                        """
-                        
-                        // Clean up local temp files
-                        sh "rm -f Dockerfile.agent docker-compose.agent.yaml"
-                        
-                        echo "✅ Agent files deployed"
+                        sh '''
+                            scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                -i "$SSH_KEY_FILE" Dockerfile.agent "${SSH_USER_PARAM}@${TARGET_VM}:${INSTALL_PATH}/Dockerfile"
+                            scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                -i "$SSH_KEY_FILE" docker-compose.agent.yaml "${SSH_USER_PARAM}@${TARGET_VM}:${INSTALL_PATH}/docker-compose.yaml"
+                        '''
                     }
+                    
+                    // Clean up local temp files
+                    sh "rm -f Dockerfile.agent docker-compose.agent.yaml"
+                    
+                    echo "✅ Agent files deployed"
                 }
             }
         }
@@ -407,63 +408,67 @@ volumes:
             }
             steps {
                 script {
+                    echo "🚀 Starting agent on ${env.TARGET_VM}..."
+                    
                     withCredentials([sshUserPrivateKey(
                         credentialsId: env.SSH_CRED_ID,
-                        keyFileVariable: 'SSH_KEY',
+                        keyFileVariable: 'SSH_KEY_FILE',
                         usernameVariable: 'SSH_USERNAME'
                     )]) {
-                        def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-                        def sshUser = env.SSH_USER_PARAM
-                        def targetVm = env.TARGET_VM
-                        def installPath = env.INSTALL_PATH
-                        
-                        echo "🚀 Starting agent on ${targetVm}..."
-                        
                         // Build and start the agent
-                        sh """
-                            ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
-                                'cd ${installPath} && docker compose up -d --build'
-                        """
+                        sh '''
+                            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
+                                "cd ${INSTALL_PATH} && docker compose up -d --build"
+                        '''
+                    }
+                    
+                    echo "⏳ Waiting for agent to connect..."
+                    
+                    // Wait for agent to come online
+                    def maxAttempts = 30
+                    def attempt = 0
+                    def connected = false
+                    def targetVm = env.TARGET_VM
+                    
+                    while (attempt < maxAttempts && !connected) {
+                        sleep(time: 5, unit: 'SECONDS')
+                        attempt++
                         
-                        echo "⏳ Waiting for agent to connect..."
-                        
-                        // Wait for agent to come online
-                        def maxAttempts = 30
-                        def attempt = 0
-                        def connected = false
-                        
-                        while (attempt < maxAttempts && !connected) {
-                            sleep(time: 5, unit: 'SECONDS')
-                            attempt++
-                            
-                            try {
-                                def node = Jenkins.instance.getNode(targetVm)
-                                if (node != null) {
-                                    def computer = node.toComputer()
-                                    if (computer != null && computer.isOnline()) {
-                                        connected = true
-                                        echo "✅ Agent connected successfully!"
-                                    }
+                        try {
+                            def node = Jenkins.instance.getNode(targetVm)
+                            if (node != null) {
+                                def computer = node.toComputer()
+                                if (computer != null && computer.isOnline()) {
+                                    connected = true
+                                    echo "✅ Agent connected successfully!"
                                 }
-                            } catch (Exception e) {
-                                // Continue waiting
                             }
-                            
-                            if (!connected) {
-                                echo "   Attempt ${attempt}/${maxAttempts}..."
-                            }
+                        } catch (Exception e) {
+                            // Continue waiting
                         }
                         
                         if (!connected) {
-                            // Check agent logs for debugging
-                            echo "⚠️ Agent not connected yet. Checking logs..."
-                            sh """
-                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
-                                    'cd ${installPath} && docker compose logs --tail=50' || true
-                            """
-                            
-                            unstable("Agent deployed but not yet connected. Check logs and network connectivity.")
+                            echo "   Attempt ${attempt}/${maxAttempts}..."
                         }
+                    }
+                    
+                    if (!connected) {
+                        // Check agent logs for debugging
+                        echo "⚠️ Agent not connected yet. Checking logs..."
+                        withCredentials([sshUserPrivateKey(
+                            credentialsId: env.SSH_CRED_ID,
+                            keyFileVariable: 'SSH_KEY_FILE',
+                            usernameVariable: 'SSH_USERNAME'
+                        )]) {
+                            sh '''
+                                ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                    -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
+                                    "cd ${INSTALL_PATH} && docker compose logs --tail=50" || true
+                            '''
+                        }
+                        
+                        unstable("Agent deployed but not yet connected. Check logs and network connectivity.")
                     }
                 }
             }
