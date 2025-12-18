@@ -1,0 +1,504 @@
+/*
+ * Jenkins Agent Remote Installation Pipeline
+ * 
+ * This pipeline installs and configures a Jenkins agent on a remote VM via SSH.
+ * 
+ * Prerequisites:
+ * 1. SSH credentials stored in Jenkins (Manage Jenkins → Credentials)
+ *    - Kind: "SSH Username with private key"
+ *    - ID: e.g., "homelab-ssh-key"
+ * 2. Target VM has Docker and Docker Compose installed
+ * 3. Jenkins master reachable from target VM on ports 8080 and 50000
+ */
+
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    parameters {
+        string(
+            name: 'TARGET_VM_IP',
+            defaultValue: '',
+            description: 'IP address of the target VM (e.g., 192.168.2.32)'
+        )
+        credentials(
+            name: 'SSH_CREDENTIAL_ID',
+            defaultValue: '',
+            description: 'SSH credential for connecting to the target VM (must be "SSH Username with private key")',
+            credentialType: 'com.cloudbees.jenkins.plugins.sshcredentials.impl.BasicSSHUserPrivateKey',
+            required: true
+        )
+        string(
+            name: 'SSH_USER',
+            defaultValue: 'root',
+            description: 'SSH username on the target VM'
+        )
+        string(
+            name: 'JENKINS_MASTER_URL',
+            defaultValue: '',
+            description: 'Jenkins Master URL (e.g., http://192.168.2.31:8080). Leave empty to auto-detect.'
+        )
+        string(
+            name: 'DOCKER_GID',
+            defaultValue: '988',
+            description: 'Docker group GID on the target VM (check with: getent group docker)'
+        )
+        string(
+            name: 'AGENT_INSTALL_PATH',
+            defaultValue: '/opt/jenkins-agent',
+            description: 'Installation path for the agent on the target VM'
+        )
+        booleanParam(
+            name: 'FORCE_REINSTALL',
+            defaultValue: false,
+            description: 'Force reinstall even if agent already exists'
+        )
+    }
+
+    environment {
+        // Will be set dynamically
+        JENKINS_MASTER = ''
+        AGENT_SECRET = ''
+    }
+
+    stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    // Validate IP address format
+                    if (!params.TARGET_VM_IP?.trim()) {
+                        error "TARGET_VM_IP is required!"
+                    }
+                    
+                    if (!(params.TARGET_VM_IP ==~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/)) {
+                        error "TARGET_VM_IP must be a valid IP address (e.g., 192.168.2.32)"
+                    }
+
+                    if (!params.SSH_CREDENTIAL_ID?.trim()) {
+                        error "SSH_CREDENTIAL_ID is required! Please create SSH credentials in Jenkins first."
+                    }
+
+                    // Determine Jenkins Master URL
+                    if (params.JENKINS_MASTER_URL?.trim()) {
+                        env.JENKINS_MASTER = params.JENKINS_MASTER_URL.trim()
+                    } else {
+                        env.JENKINS_MASTER = env.JENKINS_URL ?: "http://localhost:8080"
+                    }
+                    
+                    // Remove trailing slash
+                    env.JENKINS_MASTER = env.JENKINS_MASTER.replaceAll('/+$', '')
+
+                    echo """
+==========================================
+AGENT INSTALLATION CONFIGURATION
+==========================================
+Target VM:        ${params.TARGET_VM_IP}
+SSH User:         ${params.SSH_USER}
+Jenkins Master:   ${env.JENKINS_MASTER}
+Docker GID:       ${params.DOCKER_GID}
+Install Path:     ${params.AGENT_INSTALL_PATH}
+Force Reinstall:  ${params.FORCE_REINSTALL}
+==========================================
+"""
+                }
+            }
+        }
+
+        stage('Check Target VM Connectivity') {
+            steps {
+                script {
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: params.SSH_CREDENTIAL_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USERNAME'
+                    )]) {
+                        def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+                        def sshUser = params.SSH_USER ?: SSH_USERNAME
+                        
+                        echo "🔍 Testing SSH connection to ${params.TARGET_VM_IP}..."
+                        
+                        def sshTest = sh(
+                            script: """
+                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${params.TARGET_VM_IP} 'echo "SSH OK"'
+                            """,
+                            returnStatus: true
+                        )
+                        
+                        if (sshTest != 0) {
+                            error "❌ Cannot connect to ${params.TARGET_VM_IP} via SSH. Check credentials and network connectivity."
+                        }
+                        
+                        echo "✅ SSH connection successful"
+                        
+                        // Check if Docker is installed
+                        echo "🔍 Checking Docker installation..."
+                        
+                        def dockerCheck = sh(
+                            script: """
+                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${params.TARGET_VM_IP} 'docker --version && docker compose version'
+                            """,
+                            returnStatus: true
+                        )
+                        
+                        if (dockerCheck != 0) {
+                            error "❌ Docker or Docker Compose not installed on ${params.TARGET_VM_IP}"
+                        }
+                        
+                        echo "✅ Docker and Docker Compose are installed"
+                        
+                        // Check if agent already exists
+                        def agentExists = sh(
+                            script: """
+                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${params.TARGET_VM_IP} \
+                                    'test -f ${params.AGENT_INSTALL_PATH}/docker-compose.yaml && echo "EXISTS"'
+                            """,
+                            returnStdout: true,
+                            returnStatus: false
+                        ).trim() == "EXISTS"
+                        
+                        if (agentExists && !params.FORCE_REINSTALL) {
+                            echo "⚠️ Agent already installed at ${params.AGENT_INSTALL_PATH}"
+                            echo "   Use FORCE_REINSTALL=true to reinstall"
+                            
+                            // Check if agent is running
+                            def agentRunning = sh(
+                                script: """
+                                    ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${params.TARGET_VM_IP} \
+                                        'cd ${params.AGENT_INSTALL_PATH} && docker compose ps --format json 2>/dev/null | grep -q jenkins-agent && echo "RUNNING"' || true
+                                """,
+                                returnStdout: true
+                            ).trim()
+                            
+                            if (agentRunning == "RUNNING") {
+                                echo "✅ Agent is already running!"
+                                currentBuild.result = 'SUCCESS'
+                                return
+                            }
+                        }
+                        
+                        env.AGENT_EXISTS = agentExists ? "true" : "false"
+                    }
+                }
+            }
+        }
+
+        stage('Register Agent in Jenkins') {
+            when {
+                expression { 
+                    env.AGENT_EXISTS != "true" || params.FORCE_REINSTALL 
+                }
+            }
+            steps {
+                script {
+                    def nodeName = params.TARGET_VM_IP
+                    
+                    echo "🔧 Registering agent '${nodeName}' in Jenkins..."
+                    
+                    // Check if node already exists
+                    def nodeExists = false
+                    try {
+                        def node = Jenkins.instance.getNode(nodeName)
+                        nodeExists = (node != null)
+                    } catch (Exception e) {
+                        nodeExists = false
+                    }
+                    
+                    if (nodeExists && !params.FORCE_REINSTALL) {
+                        echo "ℹ️ Node '${nodeName}' already exists in Jenkins"
+                    } else {
+                        if (nodeExists) {
+                            echo "🗑️ Removing existing node '${nodeName}'..."
+                            Jenkins.instance.removeNode(Jenkins.instance.getNode(nodeName))
+                        }
+                        
+                        echo "➕ Creating new node '${nodeName}'..."
+                        
+                        // Create the agent node using Jenkins API
+                        def launcher = new hudson.slaves.JNLPLauncher(true)
+                        
+                        def node = new hudson.slaves.DumbSlave(
+                            nodeName,                                    // name
+                            "/home/jenkins/agent",                       // remoteFS
+                            launcher                                     // launcher
+                        )
+                        
+                        node.setNodeDescription("Homelab Agent for ${nodeName}")
+                        node.setNumExecutors(2)
+                        node.setMode(hudson.model.Node.Mode.EXCLUSIVE)
+                        node.setLabelString(nodeName)
+                        node.setRetentionStrategy(new hudson.slaves.RetentionStrategy.Always())
+                        
+                        Jenkins.instance.addNode(node)
+                        
+                        echo "✅ Node '${nodeName}' created"
+                    }
+                    
+                    // Get the secret for this agent
+                    def node = Jenkins.instance.getNode(nodeName)
+                    if (node == null) {
+                        error "Failed to find node '${nodeName}' after creation"
+                    }
+                    
+                    def computer = node.toComputer()
+                    if (computer instanceof hudson.slaves.SlaveComputer) {
+                        env.AGENT_SECRET = ((hudson.slaves.SlaveComputer) computer).getJnlpMac()
+                        echo "🔑 Agent secret retrieved"
+                    } else {
+                        error "Could not retrieve agent secret"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Agent to VM') {
+            when {
+                expression { 
+                    env.AGENT_EXISTS != "true" || params.FORCE_REINSTALL 
+                }
+            }
+            steps {
+                script {
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: params.SSH_CREDENTIAL_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USERNAME'
+                    )]) {
+                        def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+                        def sshUser = params.SSH_USER ?: SSH_USERNAME
+                        def targetVm = params.TARGET_VM_IP
+                        def installPath = params.AGENT_INSTALL_PATH
+                        
+                        echo "📦 Deploying agent files to ${targetVm}:${installPath}..."
+                        
+                        // Create installation directory
+                        sh """
+                            ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
+                                'mkdir -p ${installPath}'
+                        """
+                        
+                        // Stop existing agent if running
+                        sh """
+                            ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
+                                'cd ${installPath} && docker compose down 2>/dev/null || true'
+                        """
+                        
+                        // Create Dockerfile
+                        def dockerfile = '''# Jenkins Inbound Agent with Docker CLI
+FROM jenkins/inbound-agent:latest
+
+USER root
+
+# Install Docker CLI and Compose plugin
+RUN apt-get update && apt-get install -y \\
+    ca-certificates \\
+    curl \\
+    gnupg \\
+    && install -m 0755 -d /etc/apt/keyrings \\
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \\
+    && chmod a+r /etc/apt/keyrings/docker.gpg \\
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \\
+    && apt-get update \\
+    && apt-get install -y docker-ce-cli docker-compose-plugin \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Install additional useful tools
+RUN apt-get update && apt-get install -y \\
+    git \\
+    jq \\
+    && rm -rf /var/lib/apt/lists/*
+
+USER jenkins
+'''
+                        
+                        writeFile file: 'Dockerfile.agent', text: dockerfile
+                        
+                        // Create docker-compose.yaml with actual values
+                        def composeFile = """services:
+  jenkins-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jenkins-agent-docker:latest
+    container_name: jenkins-agent
+    restart: unless-stopped
+    
+    environment:
+      - JENKINS_URL=${env.JENKINS_MASTER}
+      - JENKINS_AGENT_NAME=${targetVm}
+      - JENKINS_SECRET=${env.AGENT_SECRET}
+      - JENKINS_AGENT_WORKDIR=/home/jenkins/agent
+    
+    volumes:
+      - agent_workspace:/home/jenkins/agent
+      - /var/run/docker.sock:/var/run/docker.sock
+    
+    group_add:
+      - "${params.DOCKER_GID}"
+
+volumes:
+  agent_workspace:
+    name: jenkins_agent_workspace
+"""
+                        
+                        writeFile file: 'docker-compose.agent.yaml', text: composeFile
+                        
+                        // Copy files to target VM
+                        sh """
+                            scp ${sshOpts} -i ${SSH_KEY} Dockerfile.agent ${sshUser}@${targetVm}:${installPath}/Dockerfile
+                            scp ${sshOpts} -i ${SSH_KEY} docker-compose.agent.yaml ${sshUser}@${targetVm}:${installPath}/docker-compose.yaml
+                        """
+                        
+                        // Clean up local temp files
+                        sh "rm -f Dockerfile.agent docker-compose.agent.yaml"
+                        
+                        echo "✅ Agent files deployed"
+                    }
+                }
+            }
+        }
+
+        stage('Start Agent') {
+            when {
+                expression { 
+                    env.AGENT_EXISTS != "true" || params.FORCE_REINSTALL 
+                }
+            }
+            steps {
+                script {
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: params.SSH_CREDENTIAL_ID,
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USERNAME'
+                    )]) {
+                        def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+                        def sshUser = params.SSH_USER ?: SSH_USERNAME
+                        def targetVm = params.TARGET_VM_IP
+                        def installPath = params.AGENT_INSTALL_PATH
+                        
+                        echo "🚀 Starting agent on ${targetVm}..."
+                        
+                        // Build and start the agent
+                        sh """
+                            ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
+                                'cd ${installPath} && docker compose up -d --build'
+                        """
+                        
+                        echo "⏳ Waiting for agent to connect..."
+                        
+                        // Wait for agent to come online
+                        def maxAttempts = 30
+                        def attempt = 0
+                        def connected = false
+                        
+                        while (attempt < maxAttempts && !connected) {
+                            sleep(time: 5, unit: 'SECONDS')
+                            attempt++
+                            
+                            try {
+                                def node = Jenkins.instance.getNode(targetVm)
+                                if (node != null) {
+                                    def computer = node.toComputer()
+                                    if (computer != null && computer.isOnline()) {
+                                        connected = true
+                                        echo "✅ Agent connected successfully!"
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // Continue waiting
+                            }
+                            
+                            if (!connected) {
+                                echo "   Attempt ${attempt}/${maxAttempts}..."
+                            }
+                        }
+                        
+                        if (!connected) {
+                            // Check agent logs for debugging
+                            echo "⚠️ Agent not connected yet. Checking logs..."
+                            sh """
+                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
+                                    'cd ${installPath} && docker compose logs --tail=50' || true
+                            """
+                            
+                            unstable("Agent deployed but not yet connected. Check logs and network connectivity.")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Verify Agent') {
+            steps {
+                script {
+                    def nodeName = params.TARGET_VM_IP
+                    
+                    def node = Jenkins.instance.getNode(nodeName)
+                    if (node != null) {
+                        def computer = node.toComputer()
+                        if (computer != null && computer.isOnline()) {
+                            echo """
+==========================================
+✅ AGENT INSTALLATION COMPLETE
+==========================================
+Agent Name:    ${nodeName}
+Agent Label:   ${nodeName}
+Status:        ONLINE
+Jenkins URL:   ${env.JENKINS_MASTER}
+==========================================
+
+The agent is ready to receive jobs with label '${nodeName}'.
+
+To deploy services to this VM, add a directory '${nodeName}/'
+in your deployments repository.
+==========================================
+"""
+                        } else {
+                            echo """
+==========================================
+⚠️ AGENT INSTALLED BUT OFFLINE
+==========================================
+Agent Name:    ${nodeName}
+Status:        OFFLINE
+
+Troubleshooting:
+1. Check agent logs on the VM:
+   ssh ${params.SSH_USER}@${nodeName}
+   cd ${params.AGENT_INSTALL_PATH}
+   docker compose logs -f
+
+2. Verify network connectivity:
+   - Port 8080: Jenkins Web UI
+   - Port 50000: Agent communication
+
+3. Check firewall settings on both machines
+==========================================
+"""
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "🎉 Agent setup completed successfully!"
+        }
+        unstable {
+            echo "⚠️ Agent setup completed with warnings"
+        }
+        failure {
+            echo "💥 Agent setup failed!"
+        }
+        cleanup {
+            // Clean up any temp files
+            sh "rm -f Dockerfile.agent docker-compose.agent.yaml 2>/dev/null || true"
+        }
+    }
+}
+

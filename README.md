@@ -101,7 +101,51 @@ See [`jenkins/SETUP.md`](jenkins/SETUP.md) for detailed setup including GitHub c
 
 ## Adding Remote VMs
 
-### Step 1: Register Agent in Jenkins
+### Option A: Automated Setup (Recommended) 🚀
+
+Use the **Agent Setup Pipeline** to automatically install agents on remote VMs:
+
+#### 1. Create SSH Credentials in Jenkins
+
+1. **Manage Jenkins → Credentials → (global) → Add Credentials**
+2. Configure:
+   - Kind: `SSH Username with private key`
+   - ID: `homelab-ssh-key` (or any name)
+   - Username: `root` (or your SSH user)
+   - Private Key: **Enter directly** → Paste your private key
+3. **Create**
+
+#### 2. Create the Agent Setup Job
+
+1. **New Item** → Name: `Agent-Setup` → **Pipeline**
+2. Pipeline:
+   - Definition: **Pipeline script from SCM**
+   - SCM: **Git**
+   - Repository URL: `https://github.com/YOUR-USER/homelab-jenkins.git`
+   - Branch: `*/main`
+   - Script Path: `Jenkinsfile.agent-setup`
+3. **Save**
+
+#### 3. Run the Job
+
+1. Click **Build with Parameters**
+2. Fill in:
+   - `TARGET_VM_IP`: IP of the target VM (e.g., `192.168.2.32`)
+   - `SSH_CREDENTIAL_ID`: Select your SSH credential
+   - `DOCKER_GID`: Docker group ID on target (check with `getent group docker`)
+3. **Build**
+
+The pipeline will:
+- ✅ Connect to the VM via SSH
+- ✅ Register the agent in Jenkins
+- ✅ Deploy and start the agent container
+- ✅ Verify the connection
+
+---
+
+### Option B: Manual Setup
+
+#### Step 1: Register Agent in Jenkins
 
 1. **Jenkins → Manage Jenkins → Nodes → New Node**
 2. Node name: `192.168.2.32` (must match directory name in deployments repo!)
@@ -117,7 +161,7 @@ See [`jenkins/SETUP.md`](jenkins/SETUP.md) for detailed setup including GitHub c
 
 5. Save → Copy the **Secret**
 
-### Step 2: Deploy Agent on Remote VM
+#### Step 2: Deploy Agent on Remote VM
 
 ```bash
 # Copy agent files to remote VM
@@ -139,7 +183,7 @@ getent group docker
 docker compose up -d --build
 ```
 
-### Step 3: Verify Connection
+#### Step 3: Verify Connection
 
 In Jenkins, the agent should show as **online** (green).
 
@@ -216,7 +260,8 @@ homelab-jenkins/
 │   ├── docker-compose.yaml
 │   ├── Dockerfile
 │   └── README.md
-├── Jenkinsfile                 # Pipeline (copy to deployments repo!)
+├── Jenkinsfile                 # Deployment Pipeline (copy to deployments repo!)
+├── Jenkinsfile.agent-setup     # Agent Installation Pipeline (run from this repo)
 └── README.md
 ```
 
