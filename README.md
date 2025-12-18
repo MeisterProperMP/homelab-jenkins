@@ -101,91 +101,211 @@ See [`jenkins/SETUP.md`](jenkins/SETUP.md) for detailed setup including GitHub c
 
 ## Adding Remote VMs
 
-### Option A: Automated Setup (Recommended) 🚀
+### Automated Agent Setup (Recommended) 🚀
 
-Use the **Agent Setup Pipeline** to automatically install agents on remote VMs:
+Use the **Agent Setup Pipeline** to automatically install Jenkins agents on remote VMs.
 
-#### 1. Create SSH Credentials in Jenkins
+---
+
+### One-Time Setup (only needed once)
+
+#### 1. Create SSH Key (without passphrase)
+
+On your local machine, create an SSH key for Jenkins:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/jenkins_agent_key -N ""
+```
+
+#### 2. Add SSH Credentials to Jenkins
 
 1. **Manage Jenkins → Credentials → (global) → Add Credentials**
 2. Configure:
-   - Kind: `SSH Username with private key`
-   - ID: `homelab-ssh-key` (or any name)
-   - Username: `root` (or your SSH user)
-   - Private Key: **Enter directly** → Paste your private key
-3. **Create**
 
-#### 2. Create the Agent Setup Job
+| Field | Value |
+|-------|-------|
+| Kind | `SSH Username with private key` |
+| Scope | `Global` |
+| ID | `homelab-ssh-key` |
+| Username | `Robin` (your SSH user) |
+| Private Key | ☑️ Enter directly → Paste content of `~/.ssh/jenkins_agent_key` |
+| Passphrase | Leave empty |
+
+3. Click **Create**
+
+#### 3. Create the Agent Setup Job
 
 1. **New Item** → Name: `Agent-Setup` → **Pipeline**
 2. Pipeline:
    - Definition: **Pipeline script from SCM**
    - SCM: **Git**
    - Repository URL: `https://github.com/YOUR-USER/homelab-jenkins.git`
-   - Branch: `*/main`
+   - Branch: `*/main` or `*/master`
    - Script Path: `Jenkinsfile.agent-setup`
 3. **Save**
 
-#### 3. Run the Job
+#### 4. Approve Script Signatures
 
-1. Click **Build with Parameters**
-2. Fill in:
-   - `TARGET_VM_IP`: IP of the target VM (e.g., `192.168.2.32`)
-   - `SSH_CREDENTIAL_ID`: Select your SSH credential
-   - `DOCKER_GID`: Docker group ID on target (check with `getent group docker`)
-3. **Build**
+The first run will fail because Jenkins needs to approve certain API calls.
 
-The pipeline will:
-- ✅ Connect to the VM via SSH
-- ✅ Register the agent in Jenkins
-- ✅ Deploy and start the agent container
-- ✅ Verify the connection
+1. Run the job once (it will fail)
+2. Go to **Manage Jenkins → In-process Script Approval**
+3. Click **Approve** for all pending signatures
+4. Repeat until all are approved (may take 2-3 runs)
+
+Expected signatures to approve:
+```
+staticMethod jenkins.model.Jenkins getInstance
+new hudson.slaves.JNLPLauncher boolean
+new hudson.slaves.DumbSlave java.lang.String java.lang.String hudson.slaves.ComputerLauncher
+method jenkins.model.Jenkins addNode hudson.model.Node
+method jenkins.model.Jenkins getNode java.lang.String
+method hudson.model.Node toComputer
+method hudson.slaves.SlaveComputer getJnlpMac
+... and more
+```
 
 ---
 
-### Option B: Manual Setup
+### Adding a New VM
 
-#### Step 1: Register Agent in Jenkins
+#### Step 1: Prepare the Target VM
 
-1. **Jenkins → Manage Jenkins → Nodes → New Node**
-2. Node name: `192.168.2.32` (must match directory name in deployments repo!)
-3. Type: **Permanent Agent**
-4. Configure:
-
-| Field | Value |
-|-------|-------|
-| Remote root directory | `/home/jenkins/agent` |
-| **Labels** | `192.168.2.32` ⬅️ Must match IP! |
-| Usage | Only build jobs with label expressions matching this node |
-| Launch method | Launch agent by connecting it to the controller |
-
-5. Save → Copy the **Secret**
-
-#### Step 2: Deploy Agent on Remote VM
+SSH into the new VM and run these commands:
 
 ```bash
-# Copy agent files to remote VM
-scp -r jenkins-agent/ user@192.168.2.32:/opt/
+# 1. Add your public key to authorized_keys
+mkdir -p ~/.ssh
+echo "YOUR_PUBLIC_KEY_HERE" >> ~/.ssh/authorized_keys
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
 
-# SSH to remote VM
-ssh user@192.168.2.32
-cd /opt/jenkins-agent
+# 2. Add your user to the docker group
+sudo usermod -aG docker $USER
 
-# Edit docker-compose.yaml:
-# - JENKINS_URL=http://192.168.2.31:8080
-# - JENKINS_AGENT_NAME=192.168.2.32
-# - JENKINS_SECRET=<secret from step 1>
+# 3. Create the agent installation directory
+sudo mkdir -p /opt/jenkins-agent
+sudo chown $USER:$USER /opt/jenkins-agent
 
-# Check Docker group GID and update if needed
+# 4. Check Docker group GID (note this for the Jenkins job)
 getent group docker
+# Example output: docker:x:988:  → GID is 988
 
-# Start agent
-docker compose up -d --build
+# 5. Log out and back in (for docker group to take effect)
+exit
 ```
 
-#### Step 3: Verify Connection
+**Quick one-liner** (replace `YOUR_PUBLIC_KEY`):
 
-In Jenkins, the agent should show as **online** (green).
+```bash
+ssh user@NEW_VM_IP 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo "YOUR_PUBLIC_KEY" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sudo usermod -aG docker $USER && sudo mkdir -p /opt/jenkins-agent && sudo chown $USER:$USER /opt/jenkins-agent'
+```
+
+#### Step 2: Verify SSH Access
+
+From your local machine, test the connection:
+
+```bash
+ssh -i ~/.ssh/jenkins_agent_key Robin@NEW_VM_IP 'echo OK && docker ps'
+```
+
+Both commands should succeed without password prompts.
+
+#### Step 3: Run the Agent Setup Job
+
+1. In Jenkins, go to **Agent-Setup** job
+2. Click **Build with Parameters**
+3. Fill in:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `TARGET_VM_IP` | `192.168.2.XX` | Complete the IP address |
+| `SSH_CREDENTIAL_ID` | `homelab-ssh-key` | Select from dropdown |
+| `SSH_USER` | `Robin` | Default is `Robin` |
+| `JENKINS_MASTER_URL` | `http://192.168.2.31:8080` | Your Jenkins URL |
+| `DOCKER_GID` | `988` | From `getent group docker` |
+| `AGENT_INSTALL_PATH` | `/opt/jenkins-agent` | Default path |
+| `FORCE_REINSTALL` | ☐ `false` | Check if reinstalling |
+
+4. Click **Build**
+
+#### Step 4: Verify Agent is Online
+
+1. Go to **Manage Jenkins → Nodes**
+2. The new agent (named by IP) should show as **online** (green icon)
+
+If offline, check the logs:
+```bash
+ssh Robin@NEW_VM_IP 'cd /opt/jenkins-agent && docker compose logs -f'
+```
+
+---
+
+### What the Pipeline Does
+
+The `Jenkinsfile.agent-setup` pipeline:
+
+1. ✅ Validates parameters and SSH connectivity
+2. ✅ Checks Docker installation on target VM
+3. ✅ Registers the agent node in Jenkins (with IP as label)
+4. ✅ Retrieves the agent secret automatically
+5. ✅ Deploys Dockerfile and docker-compose.yaml to the VM
+6. ✅ Builds and starts the agent container
+7. ✅ Waits for the agent to connect
+8. ✅ Verifies the connection
+
+---
+
+### Troubleshooting Agent Setup
+
+#### SSH Permission Denied
+
+```bash
+# Check if key works locally
+ssh -i ~/.ssh/jenkins_agent_key Robin@VM_IP 'echo OK'
+
+# If it fails:
+# 1. Verify public key is in ~/.ssh/authorized_keys on target
+# 2. Check file permissions (700 for .ssh, 600 for authorized_keys)
+# 3. Ensure the private key in Jenkins matches
+```
+
+#### Docker Permission Denied
+
+```bash
+# On the target VM:
+sudo usermod -aG docker Robin
+# Then log out and back in, or:
+newgrp docker
+```
+
+#### Agent Not Connecting
+
+```bash
+# Check agent logs on the VM:
+ssh Robin@VM_IP 'cd /opt/jenkins-agent && docker compose logs --tail=100'
+
+# Common issues:
+# - JENKINS_URL not reachable from VM (check firewall)
+# - Port 50000 blocked (agent communication port)
+# - Wrong JENKINS_SECRET (use FORCE_REINSTALL=true)
+```
+
+#### Reinstalling an Agent
+
+If you need to reinstall, run the job with:
+- `FORCE_REINSTALL` = ☑️ `true`
+
+This will:
+- Remove and recreate the Jenkins node
+- Generate a new secret
+- Redeploy the agent container
+
+---
+
+### Manual Setup (Alternative)
+
+If you prefer manual setup, see the `jenkins-agent/README.md` for step-by-step instructions.
 
 ---
 
