@@ -80,18 +80,24 @@ pipeline {
                     def targetVmIp = getParam(params.TARGET_VM_IP, '')
                     def sshCredentialId = getParam(params.SSH_CREDENTIAL_ID, '')
                     def sshUser = getParam(params.SSH_USER, 'root')
-                    def jenkinsUrl = getParam(params.JENKINS_MASTER_URL, 'http://192.168.2.31:8080')
                     def dockerGid = getParam(params.DOCKER_GID, '988')
                     def installPath = getParam(params.AGENT_INSTALL_PATH, '/opt/jenkins-agent')
                     def forceReinstall = params.FORCE_REINSTALL ?: false
                     
-                    // Fallback to env.JENKINS_URL if still empty
-                    if (!jenkinsUrl || jenkinsUrl == 'http://192.168.2.31:8080') {
-                        def envUrl = getParam(env.JENKINS_URL, null)
-                        if (envUrl) {
-                            jenkinsUrl = envUrl
-                        }
+                    // Determine Jenkins URL with fallback chain
+                    def jenkinsUrl = getParam(params.JENKINS_MASTER_URL, null)
+                    if (!jenkinsUrl) {
+                        jenkinsUrl = getParam(env.JENKINS_URL, null)
                     }
+                    if (!jenkinsUrl) {
+                        // Hardcoded fallback
+                        jenkinsUrl = 'http://192.168.2.31:8080'
+                    }
+                    
+                    // Debug output
+                    echo "DEBUG: params.JENKINS_MASTER_URL = ${params.JENKINS_MASTER_URL}"
+                    echo "DEBUG: env.JENKINS_URL = ${env.JENKINS_URL}"
+                    echo "DEBUG: jenkinsUrl resolved to = ${jenkinsUrl}"
                     
                     // Validate required parameters
                     if (!targetVmIp) {
