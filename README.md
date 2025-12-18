@@ -169,39 +169,40 @@ method hudson.slaves.SlaveComputer getJnlpMac
 
 ### Adding a New VM
 
+#### Prerequisites
+
+The VM must be provisioned with:
+- ✅ SSH access configured (e.g., via Terraform)
+- ✅ Docker and Docker Compose installed
+- ✅ Your SSH public key already in `~/.ssh/authorized_keys`
+
 #### Step 1: Prepare the Target VM
 
 SSH into the new VM and run these commands:
 
 ```bash
-# 1. Add your public key to authorized_keys
-mkdir -p ~/.ssh
-echo "YOUR_PUBLIC_KEY_HERE" >> ~/.ssh/authorized_keys
-chmod 700 ~/.ssh
-chmod 600 ~/.ssh/authorized_keys
-
-# 2. Add your user to the docker group
+# 1. Add your user to the docker group
 sudo usermod -aG docker $USER
 
-# 3. Create the agent installation directory
+# 2. Create the agent installation directory
 sudo mkdir -p /opt/jenkins-agent
 sudo chown $USER:$USER /opt/jenkins-agent
 
-# 4. Check Docker group GID (note this for the Jenkins job)
+# 3. Check Docker group GID (note this for the Jenkins job)
 getent group docker
 # Example output: docker:x:988:  → GID is 988
 
-# 5. Log out and back in (for docker group to take effect)
+# 4. Log out and back in (for docker group to take effect)
 exit
 ```
 
-**Quick one-liner** (replace `YOUR_PUBLIC_KEY`):
+**Quick one-liner:**
 
 ```bash
-ssh user@NEW_VM_IP 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo "YOUR_PUBLIC_KEY" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sudo usermod -aG docker $USER && sudo mkdir -p /opt/jenkins-agent && sudo chown $USER:$USER /opt/jenkins-agent'
+ssh Robin@NEW_VM_IP 'sudo usermod -aG docker $USER && sudo mkdir -p /opt/jenkins-agent && sudo chown $USER:$USER /opt/jenkins-agent && getent group docker'
 ```
 
-#### Step 2: Verify SSH Access
+#### Step 2: Verify Access
 
 From your local machine, test the connection:
 
