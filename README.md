@@ -109,15 +109,12 @@ Use the **Agent Setup Pipeline** to automatically install Jenkins agents on remo
 
 ### One-Time Setup (only needed once)
 
-#### 1. Create SSH Key (without passphrase)
+#### 1. Add SSH Credentials to Jenkins
 
-On your local machine, create an SSH key for Jenkins:
+Use your existing SSH private key (the one used by Terraform to provision VMs).
 
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/jenkins_agent_key -N ""
-```
-
-#### 2. Add SSH Credentials to Jenkins
+> ⚠️ **Important:** The key must be **without passphrase** for Jenkins automation to work.
+> To remove a passphrase from an existing key: `ssh-keygen -p -f ~/.ssh/your_key`
 
 1. **Manage Jenkins → Credentials → (global) → Add Credentials**
 2. Configure:
@@ -133,7 +130,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/jenkins_agent_key -N ""
 
 3. Click **Create**
 
-#### 3. Create the Agent Setup Job
+#### 2. Create the Agent Setup Job
 
 1. **New Item** → Name: `Agent-Setup` → **Pipeline**
 2. Pipeline:
@@ -144,7 +141,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/jenkins_agent_key -N ""
    - Script Path: `Jenkinsfile.agent-setup`
 3. **Save**
 
-#### 4. Approve Script Signatures
+#### 3. Approve Script Signatures
 
 The first run will fail because Jenkins needs to approve certain API calls.
 
