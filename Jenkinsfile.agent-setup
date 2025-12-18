@@ -60,11 +60,8 @@ pipeline {
         )
     }
 
-    environment {
-        // Will be set dynamically
-        JENKINS_MASTER = ''
-        AGENT_SECRET = ''
-    }
+    // Note: Environment variables are set dynamically in the Validate Parameters stage
+    // Using env.VARIABLE_NAME = value instead of environment {} block
 
     stages {
         stage('Validate Parameters') {
