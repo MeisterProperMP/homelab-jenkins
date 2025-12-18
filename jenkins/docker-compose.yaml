@@ -1,0 +1,53 @@
+services:
+  jenkins:
+    # Custom image with Docker CLI + Compose pre-installed
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: homelab-jenkins:latest
+    container_name: jenkins
+    restart: unless-stopped
+    
+    ports:
+      - "8080:8080"   # Web UI
+      - "50000:50000" # Agent Port
+    
+    environment:
+      - TZ=Europe/Berlin
+      # Java options for better performance
+      - JAVA_OPTS=-Xmx2g
+    
+    volumes:
+      # Jenkins Home - persistent data
+      - jenkins_home:/var/jenkins_home
+      
+      # Init Scripts (optional)
+      - ./configs/init.groovy.d:/var/jenkins_home/init.groovy.d:ro
+      
+      # Docker Socket - so Jenkins can run Docker commands
+      - /var/run/docker.sock:/var/run/docker.sock
+      
+      # ============================================================
+      # CRITICAL: Workspace path must be IDENTICAL (inside = outside)
+      # ============================================================
+      # The path inside the container MUST match the host path!
+      # Otherwise relative volume mounts (./configs) won't work.
+      # ============================================================
+      - /opt/homelab/workspace:/opt/homelab/workspace
+      
+    # Healthcheck
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    
+    # Docker Socket Group - GID must match the host!
+    # Check with: getent group docker
+    group_add:
+      - "988"
+
+volumes:
+  jenkins_home:
+    name: jenkins_home
