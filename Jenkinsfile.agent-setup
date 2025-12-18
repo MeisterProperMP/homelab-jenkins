@@ -23,7 +23,7 @@ pipeline {
     parameters {
         string(
             name: 'TARGET_VM_IP',
-            defaultValue: '',
+            defaultValue: '192.168.2.',
             description: 'IP address of the target VM (e.g., 192.168.2.32)'
         )
         credentials(
@@ -35,7 +35,7 @@ pipeline {
         )
         string(
             name: 'SSH_USER',
-            defaultValue: 'root',
+            defaultValue: 'Robin',
             description: 'SSH username on the target VM'
         )
         string(
@@ -76,7 +76,7 @@ pipeline {
                     // Get parameters with proper defaults
                     def targetVmIp = getParam(params.TARGET_VM_IP, '')
                     def sshCredentialId = getParam(params.SSH_CREDENTIAL_ID, '')
-                    def sshUser = getParam(params.SSH_USER, 'root')
+                    def sshUser = getParam(params.SSH_USER, 'Robin')
                     def dockerGid = getParam(params.DOCKER_GID, '988')
                     def installPath = getParam(params.AGENT_INSTALL_PATH, '/opt/jenkins-agent')
                     def forceReinstall = params.FORCE_REINSTALL ?: false
@@ -91,10 +91,6 @@ pipeline {
                         jenkinsUrl = 'http://192.168.2.31:8080'
                     }
                     
-                    // Debug output
-                    echo "DEBUG: params.JENKINS_MASTER_URL = ${params.JENKINS_MASTER_URL}"
-                    echo "DEBUG: env.JENKINS_URL = ${env.JENKINS_URL}"
-                    echo "DEBUG: jenkinsUrl resolved to = ${jenkinsUrl}"
                     
                     // Validate required parameters
                     if (!targetVmIp) {
@@ -134,9 +130,7 @@ Please provide JENKINS_MASTER_URL parameter
                     }
                     
                     // Remove trailing slash and store validated values
-                    def cleanJenkinsUrl = jenkinsUrl.endsWith('/') ? jenkinsUrl[0..-2] : jenkinsUrl
-                    env.JENKINS_MASTER = cleanJenkinsUrl
-                    echo "DEBUG: env.JENKINS_MASTER set to = ${env.JENKINS_MASTER}"
+                    env.JENKINS_MASTER = jenkinsUrl.endsWith('/') ? jenkinsUrl[0..-2] : jenkinsUrl
                     
                     env.TARGET_VM = targetVmIp
                     env.SSH_CRED_ID = sshCredentialId
