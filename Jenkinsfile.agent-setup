@@ -40,8 +40,8 @@ pipeline {
         )
         string(
             name: 'JENKINS_MASTER_URL',
-            defaultValue: '',
-            description: 'Jenkins Master URL (e.g., http://192.168.2.31:8080). Leave empty to auto-detect.'
+            defaultValue: 'http://192.168.2.31:8080',
+            description: 'Jenkins Master URL reachable from the target VM (e.g., http://192.168.2.31:8080)'
         )
         string(
             name: 'DOCKER_GID',
@@ -70,39 +70,70 @@ pipeline {
         stage('Validate Parameters') {
             steps {
                 script {
-                    // Validate IP address format
-                    if (!params.TARGET_VM_IP?.trim()) {
-                        error "TARGET_VM_IP is required!"
+                    // Check if this is the first run (parameters not yet defined)
+                    def targetVmIp = params.TARGET_VM_IP?.trim() ?: ''
+                    def sshCredentialId = params.SSH_CREDENTIAL_ID?.trim() ?: ''
+                    
+                    if (!targetVmIp) {
+                        error """
+==========================================
+⚠️ FIRST RUN - PARAMETERS REQUIRED
+==========================================
+This is likely the first run of this pipeline.
+Jenkins needs this run to discover parameters.
+
+Please run the job again with "Build with Parameters"
+and provide:
+  - TARGET_VM_IP: IP address of the target VM
+  - SSH_CREDENTIAL_ID: Your SSH credential
+==========================================
+"""
                     }
                     
-                    if (!(params.TARGET_VM_IP ==~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/)) {
+                    if (!(targetVmIp ==~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/)) {
                         error "TARGET_VM_IP must be a valid IP address (e.g., 192.168.2.32)"
                     }
 
-                    if (!params.SSH_CREDENTIAL_ID?.trim()) {
+                    if (!sshCredentialId) {
                         error "SSH_CREDENTIAL_ID is required! Please create SSH credentials in Jenkins first."
                     }
 
-                    // Determine Jenkins Master URL
-                    if (params.JENKINS_MASTER_URL?.trim()) {
-                        env.JENKINS_MASTER = params.JENKINS_MASTER_URL.trim()
-                    } else {
-                        env.JENKINS_MASTER = env.JENKINS_URL ?: "http://localhost:8080"
+                    // Determine Jenkins Master URL - handle null/empty cases
+                    def jenkinsUrl = params.JENKINS_MASTER_URL?.trim()
+                    if (!jenkinsUrl) {
+                        jenkinsUrl = env.JENKINS_URL?.trim()
+                    }
+                    if (!jenkinsUrl) {
+                        error """
+==========================================
+⚠️ JENKINS_MASTER_URL REQUIRED
+==========================================
+Could not auto-detect Jenkins URL.
+Please provide JENKINS_MASTER_URL parameter
+(e.g., http://192.168.2.31:8080)
+==========================================
+"""
                     }
                     
-                    // Remove trailing slash
-                    env.JENKINS_MASTER = env.JENKINS_MASTER.replaceAll('/+$', '')
+                    // Remove trailing slash and store validated values
+                    env.JENKINS_MASTER = jenkinsUrl.replaceAll('/+$', '')
+                    env.TARGET_VM = targetVmIp
+                    env.SSH_CRED_ID = sshCredentialId
+                    env.SSH_USER_PARAM = params.SSH_USER ?: 'root'
+                    env.DOCKER_GID_PARAM = params.DOCKER_GID ?: '988'
+                    env.INSTALL_PATH = params.AGENT_INSTALL_PATH ?: '/opt/jenkins-agent'
+                    env.FORCE_REINSTALL_FLAG = params.FORCE_REINSTALL ? 'true' : 'false'
 
                     echo """
 ==========================================
 AGENT INSTALLATION CONFIGURATION
 ==========================================
-Target VM:        ${params.TARGET_VM_IP}
-SSH User:         ${params.SSH_USER}
+Target VM:        ${env.TARGET_VM}
+SSH User:         ${env.SSH_USER_PARAM}
 Jenkins Master:   ${env.JENKINS_MASTER}
-Docker GID:       ${params.DOCKER_GID}
-Install Path:     ${params.AGENT_INSTALL_PATH}
-Force Reinstall:  ${params.FORCE_REINSTALL}
+Docker GID:       ${env.DOCKER_GID_PARAM}
+Install Path:     ${env.INSTALL_PATH}
+Force Reinstall:  ${env.FORCE_REINSTALL_FLAG}
 ==========================================
 """
                 }
@@ -113,24 +144,27 @@ Force Reinstall:  ${params.FORCE_REINSTALL}
             steps {
                 script {
                     withCredentials([sshUserPrivateKey(
-                        credentialsId: params.SSH_CREDENTIAL_ID,
+                        credentialsId: env.SSH_CRED_ID,
                         keyFileVariable: 'SSH_KEY',
                         usernameVariable: 'SSH_USERNAME'
                     )]) {
                         def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
-                        def sshUser = params.SSH_USER ?: SSH_USERNAME
+                        def sshUser = env.SSH_USER_PARAM
+                        def targetVm = env.TARGET_VM
+                        def installPath = env.INSTALL_PATH
+                        def forceReinstall = env.FORCE_REINSTALL_FLAG == 'true'
                         
-                        echo "🔍 Testing SSH connection to ${params.TARGET_VM_IP}..."
+                        echo "🔍 Testing SSH connection to ${targetVm}..."
                         
                         def sshTest = sh(
                             script: """
-                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${params.TARGET_VM_IP} 'echo "SSH OK"'
+                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} 'echo "SSH OK"'
                             """,
                             returnStatus: true
                         )
                         
                         if (sshTest != 0) {
-                            error "❌ Cannot connect to ${params.TARGET_VM_IP} via SSH. Check credentials and network connectivity."
+                            error "❌ Cannot connect to ${targetVm} via SSH. Check credentials and network connectivity."
                         }
                         
                         echo "✅ SSH connection successful"
@@ -140,36 +174,37 @@ Force Reinstall:  ${params.FORCE_REINSTALL}
                         
                         def dockerCheck = sh(
                             script: """
-                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${params.TARGET_VM_IP} 'docker --version && docker compose version'
+                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} 'docker --version && docker compose version'
                             """,
                             returnStatus: true
                         )
                         
                         if (dockerCheck != 0) {
-                            error "❌ Docker or Docker Compose not installed on ${params.TARGET_VM_IP}"
+                            error "❌ Docker or Docker Compose not installed on ${targetVm}"
                         }
                         
                         echo "✅ Docker and Docker Compose are installed"
                         
                         // Check if agent already exists
-                        def agentExists = sh(
+                        def agentExistsCheck = sh(
                             script: """
-                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${params.TARGET_VM_IP} \
-                                    'test -f ${params.AGENT_INSTALL_PATH}/docker-compose.yaml && echo "EXISTS"'
+                                ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
+                                    'test -f ${installPath}/docker-compose.yaml && echo "EXISTS" || echo "NOT_EXISTS"'
                             """,
-                            returnStdout: true,
-                            returnStatus: false
-                        ).trim() == "EXISTS"
+                            returnStdout: true
+                        ).trim()
                         
-                        if (agentExists && !params.FORCE_REINSTALL) {
-                            echo "⚠️ Agent already installed at ${params.AGENT_INSTALL_PATH}"
+                        def agentExists = (agentExistsCheck == "EXISTS")
+                        
+                        if (agentExists && !forceReinstall) {
+                            echo "⚠️ Agent already installed at ${installPath}"
                             echo "   Use FORCE_REINSTALL=true to reinstall"
                             
                             // Check if agent is running
                             def agentRunning = sh(
                                 script: """
-                                    ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${params.TARGET_VM_IP} \
-                                        'cd ${params.AGENT_INSTALL_PATH} && docker compose ps --format json 2>/dev/null | grep -q jenkins-agent && echo "RUNNING"' || true
+                                    ssh ${sshOpts} -i ${SSH_KEY} ${sshUser}@${targetVm} \
+                                        'cd ${installPath} && docker compose ps --format json 2>/dev/null | grep -q jenkins-agent && echo "RUNNING"' || true
                                 """,
                                 returnStdout: true
                             ).trim()
@@ -190,12 +225,13 @@ Force Reinstall:  ${params.FORCE_REINSTALL}
         stage('Register Agent in Jenkins') {
             when {
                 expression { 
-                    env.AGENT_EXISTS != "true" || params.FORCE_REINSTALL 
+                    env.AGENT_EXISTS != "true" || env.FORCE_REINSTALL_FLAG == 'true'
                 }
             }
             steps {
                 script {
-                    def nodeName = params.TARGET_VM_IP
+                    def nodeName = env.TARGET_VM
+                    def forceReinstall = env.FORCE_REINSTALL_FLAG == 'true'
                     
                     echo "🔧 Registering agent '${nodeName}' in Jenkins..."
                     
@@ -208,7 +244,7 @@ Force Reinstall:  ${params.FORCE_REINSTALL}
                         nodeExists = false
                     }
                     
-                    if (nodeExists && !params.FORCE_REINSTALL) {
+                    if (nodeExists && !forceReinstall) {
                         echo "ℹ️ Node '${nodeName}' already exists in Jenkins"
                     } else {
                         if (nodeExists) {
@@ -258,20 +294,21 @@ Force Reinstall:  ${params.FORCE_REINSTALL}
         stage('Deploy Agent to VM') {
             when {
                 expression { 
-                    env.AGENT_EXISTS != "true" || params.FORCE_REINSTALL 
+                    env.AGENT_EXISTS != "true" || env.FORCE_REINSTALL_FLAG == 'true'
                 }
             }
             steps {
                 script {
                     withCredentials([sshUserPrivateKey(
-                        credentialsId: params.SSH_CREDENTIAL_ID,
+                        credentialsId: env.SSH_CRED_ID,
                         keyFileVariable: 'SSH_KEY',
                         usernameVariable: 'SSH_USERNAME'
                     )]) {
                         def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-                        def sshUser = params.SSH_USER ?: SSH_USERNAME
-                        def targetVm = params.TARGET_VM_IP
-                        def installPath = params.AGENT_INSTALL_PATH
+                        def sshUser = env.SSH_USER_PARAM
+                        def targetVm = env.TARGET_VM
+                        def installPath = env.INSTALL_PATH
+                        def dockerGid = env.DOCKER_GID_PARAM
                         
                         echo "📦 Deploying agent files to ${targetVm}:${installPath}..."
                         
@@ -338,7 +375,7 @@ USER jenkins
       - /var/run/docker.sock:/var/run/docker.sock
     
     group_add:
-      - "${params.DOCKER_GID}"
+      - "${dockerGid}"
 
 volumes:
   agent_workspace:
@@ -365,20 +402,20 @@ volumes:
         stage('Start Agent') {
             when {
                 expression { 
-                    env.AGENT_EXISTS != "true" || params.FORCE_REINSTALL 
+                    env.AGENT_EXISTS != "true" || env.FORCE_REINSTALL_FLAG == 'true'
                 }
             }
             steps {
                 script {
                     withCredentials([sshUserPrivateKey(
-                        credentialsId: params.SSH_CREDENTIAL_ID,
+                        credentialsId: env.SSH_CRED_ID,
                         keyFileVariable: 'SSH_KEY',
                         usernameVariable: 'SSH_USERNAME'
                     )]) {
                         def sshOpts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-                        def sshUser = params.SSH_USER ?: SSH_USERNAME
-                        def targetVm = params.TARGET_VM_IP
-                        def installPath = params.AGENT_INSTALL_PATH
+                        def sshUser = env.SSH_USER_PARAM
+                        def targetVm = env.TARGET_VM
+                        def installPath = env.INSTALL_PATH
                         
                         echo "🚀 Starting agent on ${targetVm}..."
                         
@@ -435,7 +472,7 @@ volumes:
         stage('Verify Agent') {
             steps {
                 script {
-                    def nodeName = params.TARGET_VM_IP
+                    def nodeName = env.TARGET_VM
                     
                     def node = Jenkins.instance.getNode(nodeName)
                     if (node != null) {
@@ -467,8 +504,8 @@ Status:        OFFLINE
 
 Troubleshooting:
 1. Check agent logs on the VM:
-   ssh ${params.SSH_USER}@${nodeName}
-   cd ${params.AGENT_INSTALL_PATH}
+   ssh ${env.SSH_USER_PARAM}@${nodeName}
+   cd ${env.INSTALL_PATH}
    docker compose logs -f
 
 2. Verify network connectivity:
