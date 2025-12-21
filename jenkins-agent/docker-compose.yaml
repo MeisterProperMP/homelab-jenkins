@@ -1,13 +1,7 @@
 # Jenkins Agent for Remote VMs
-# 
-# Setup Instructions:
-# 1. Register agent in Jenkins UI (Manage Jenkins → Nodes → New Node)
-#    - Name: Use the VM's IP address (e.g., 192.168.2.32)
-#    - Label: Same as name (IP address)
-#    - Launch method: "Launch agent by connecting it to the controller"
-# 2. Copy the secret from Jenkins UI
-# 3. Update the environment variables below
-# 4. Run: docker compose up -d --build
+#
+# This file is deployed by Jenkinsfile.agent-setup
+# Environment variables are set via .env file (auto-generated)
 
 services:
   jenkins-agent:
@@ -19,29 +13,17 @@ services:
     restart: unless-stopped
     
     environment:
-      # Jenkins Master URL (must be reachable from this VM)
-      - JENKINS_URL=http://192.168.2.31:8080
-      
-      # Agent name - MUST match the node name in Jenkins AND directory name in repo
-      - JENKINS_AGENT_NAME=192.168.2.32
-      
-      # Secret from Jenkins UI (Manage Jenkins → Nodes → <agent> → Secret)
-      - JENKINS_SECRET=your-secret-here
-      
-      # Working directory for the agent
+      - JENKINS_URL=${JENKINS_URL}
+      - JENKINS_AGENT_NAME=${JENKINS_AGENT_NAME}
+      - JENKINS_SECRET=${JENKINS_SECRET}
       - JENKINS_AGENT_WORKDIR=/home/jenkins/agent
     
     volumes:
-    
-      # home-jenkins-agent - where the deployments are handled
+      # Deployment directory - where deployments are stored persistently
       - /home/jenkins-agent:/home/jenkins-agent
-      
       # Docker socket - allows agent to run Docker commands
       - /var/run/docker.sock:/var/run/docker.sock
     
     # Docker socket group - must match host's docker GID
-    # Check with: getent group docker
     group_add:
-      - "988"
-
-
+      - "${DOCKER_GID}"
