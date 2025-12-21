@@ -35,6 +35,9 @@ services:
       # Agent workspace - where jobs run
       - agent_workspace:/home/jenkins/agent
       
+      # home-jenkins-agent - where the deployments are handled
+      - /home/jenkins-agent:/home/jenkins-agent
+      
       # Docker socket - allows agent to run Docker commands
       - /var/run/docker.sock:/var/run/docker.sock
     
