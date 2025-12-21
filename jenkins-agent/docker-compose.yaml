@@ -32,9 +32,7 @@ services:
       - JENKINS_AGENT_WORKDIR=/home/jenkins/agent
     
     volumes:
-      # Agent workspace - where jobs run
-      - agent_workspace:/home/jenkins/agent
-      
+    
       # home-jenkins-agent - where the deployments are handled
       - /home/jenkins-agent:/home/jenkins-agent
       
@@ -46,7 +44,4 @@ services:
     group_add:
       - "988"
 
-volumes:
-  agent_workspace:
-    name: jenkins_agent_workspace
 
