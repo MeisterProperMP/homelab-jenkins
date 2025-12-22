@@ -1,164 +1,230 @@
-# Jenkins Setup Guide
+# Jenkins Master Setup
 
-## 1. Create Directory on Host
+Guide for setting up the Jenkins Master from scratch.
+
+---
+
+## 1. Prerequisites on Host VM
 
 ```bash
-# Create workspace directory (must match Jenkinsfile customWorkspace!)
+# Docker and Docker Compose must be installed
+docker --version
+docker compose version
+```
+
+---
+
+## 2. Create Directories
+
+```bash
+# Workspace directory (must be mounted identically in container)
 sudo mkdir -p /opt/homelab/workspace
 sudo chown -R 1000:1000 /opt/homelab/workspace
 ```
 
-## 2. Check Docker GID
+---
+
+## 3. Check Docker GID
 
 ```bash
-# Find Docker group GID
 getent group docker
-# Output e.g.: docker:x:999:
-
-# If the GID is not 999, adjust in docker-compose.yaml:
-# group_add:
-#   - "YOUR_GID"
+# Example output: docker:x:988:
 ```
 
-## 3. Start Jenkins
+If GID is **not 988**, update `docker-compose.yaml`:
+
+```yaml
+group_add:
+  - "YOUR_GID"
+```
+
+---
+
+## 4. Start Jenkins
 
 ```bash
 cd jenkins
-
-# Build image and start
 docker compose up -d --build
 
-# Watch logs
+# Follow logs
 docker compose logs -f
 ```
 
-## 4. Initial Admin Password
+---
+
+## 5. Initial Admin Password
 
 ```bash
-# On first start - read admin password
 docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
 ```
 
-## 5. Configure Jenkins
+---
 
-1. Open browser: `http://YOUR-VM-IP:8080`
-2. Enter Initial Admin Password
-3. Select "Install suggested plugins"
+## 6. Configure Jenkins Web UI
+
+1. Open browser: `http://VM-IP:8080`
+2. Enter initial admin password
+3. Select **Install suggested plugins**
 4. Create admin user
 
-## 6. Set Up GitHub Credentials (for private repos)
+---
 
-### Option A: Personal Access Token (recommended)
+## 7. Add Credentials
 
-**1. Create token in GitHub:**
-1. GitHub → Settings → Developer settings → Personal access tokens → **Tokens (classic)**
-2. **Generate new token (classic)**
-3. Name: `jenkins-homelab`
-4. Expiration: As needed (e.g. 90 days or No expiration)
-5. Select scopes:
-   - ☑️ `repo` (Full control of private repositories)
-6. **Generate token**
-7. ⚠️ **Copy and save the token securely!** (shown only once)
+### A) SSH Key for Agent Setup
 
-**2. Save token in Jenkins:**
-1. Jenkins → **Manage Jenkins** → **Credentials**
-2. Click on **(global)** under "Stores scoped to Jenkins"
-3. **Add Credentials**
-4. Fill in:
-   - Kind: `Username with password`
-   - Scope: `Global`
-   - Username: `your-github-username`
-   - Password: `ghp_xxxxxxxxxxxx` (your token)
-   - ID: `github-credentials`
-   - Description: `GitHub PAT for Homelab Repo`
-5. **Create**
+This key is used to install agents on remote VMs.
 
-### Option B: SSH Key
+1. **Manage Jenkins → Credentials → (global) → Add Credentials**
+2. Configuration:
 
-**1. Generate SSH key on the VM:**
+| Field | Value |
+|-------|-------|
+| Kind | `SSH Username with private key` |
+| ID | `homelab-ssh-key` |
+| Username | `Robin` |
+| Private Key | ☑️ Enter directly → Paste SSH private key |
+| Passphrase | Leave empty (key must have no passphrase!) |
+
+> ⚠️ Key must be **without passphrase**. Remove with: `ssh-keygen -p -f ~/.ssh/key`
+
+### B) GitHub Credentials (for private repos)
+
+**Option 1: Personal Access Token (recommended)**
+
+1. GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
+2. Generate new token:
+   - Name: `jenkins-homelab`
+   - Scopes: ☑️ `repo`
+3. Copy token
+
+In Jenkins:
+1. **Manage Jenkins → Credentials → (global) → Add Credentials**
+2. Configuration:
+
+| Field | Value |
+|-------|-------|
+| Kind | `Username with password` |
+| ID | `github-credentials` |
+| Username | Your GitHub username |
+| Password | The token (`ghp_xxx...`) |
+
+**Option 2: SSH Deploy Key**
+
 ```bash
 # Inside Jenkins container
 docker exec -it jenkins bash
 ssh-keygen -t ed25519 -C "jenkins@homelab" -f /var/jenkins_home/.ssh/github_key
 cat /var/jenkins_home/.ssh/github_key.pub
-# Copy the public key!
 exit
 ```
 
-**2. Add public key in GitHub:**
-1. GitHub → Repo → Settings → Deploy keys → **Add deploy key**
-2. Title: `Jenkins Homelab`
-3. Key: Paste the copied public key
-4. ☑️ Allow write access (if needed)
-5. **Add key**
+Add public key to GitHub: Repo → Settings → Deploy keys → Add
 
-**3. Save private key in Jenkins:**
-1. Jenkins → **Manage Jenkins** → **Credentials**
-2. **(global)** → **Add Credentials**
-3. Fill in:
-   - Kind: `SSH Username with private key`
-   - Scope: `Global`
-   - ID: `github-ssh`
-   - Username: `git`
-   - Private Key: **Enter directly** → Paste private key:
-     ```bash
-     docker exec jenkins cat /var/jenkins_home/.ssh/github_key
-     ```
-5. **Create**
+Add private key to Jenkins: Credentials → Add → SSH Username with private key
 
-## 7. Set Up Pipeline
+---
+
+## 8. Create Pipeline Jobs
+
+### Deployment Pipeline
 
 1. **New Item** → Name: `Homelab-Deployment` → **Pipeline**
 2. Configuration:
-   - ☑️ GitHub project: `https://github.com/YOUR-USER/homelab-src`
+   - ☑️ GitHub project: `https://github.com/USER/homelab-deployments`
    - Build Triggers: ☑️ Poll SCM: `H/5 * * * *`
    - Pipeline:
      - Definition: **Pipeline script from SCM**
      - SCM: **Git**
-     - Repository URL: 
-       - With Token: `https://github.com/YOUR-USER/homelab-src.git`
-       - With SSH: `git@github.com:YOUR-USER/homelab-src.git`
-     - **Credentials**: Select `github-credentials` or `github-ssh` ⬅️ IMPORTANT!
+     - Repository URL: `https://github.com/USER/homelab-deployments.git`
+     - Credentials: `github-credentials`
      - Branch: `*/main`
      - Script Path: `Jenkinsfile`
 3. **Save**
-4. **Build Now** to test
 
-## Directory Structure After Setup
+### Agent Setup Pipeline
 
+1. **New Item** → Name: `Agent-Setup` → **Pipeline**
+2. Configuration:
+   - Pipeline:
+     - Definition: **Pipeline script from SCM**
+     - SCM: **Git**
+     - Repository URL: `https://github.com/USER/homelab-jenkins.git`
+     - Branch: `*/main`
+     - Script Path: `Jenkinsfile.agent-setup`
+3. **Save**
+
+---
+
+## 9. Script Approvals
+
+The Agent Setup pipeline requires approval for Jenkins API calls.
+
+1. Run Agent-Setup job once (will fail)
+2. **Manage Jenkins → In-process Script Approval**
+3. Approve all displayed signatures
+4. Repeat until all are approved (2-3 runs)
+
+Expected signatures:
 ```
-Host System:
-/opt/homelab/
-├── workspace/                    # Jenkins Workspace (Volume Mount)
-│   └── homelab-deployment/       # Cloned Repo
-│       ├── traefik/
-│       │   ├── docker-compose.yaml
-│       │   └── configs/
-│       └── ...
-└── jenkins-data/                 # Jenkins Home (optional)
+staticMethod jenkins.model.Jenkins getInstance
+new hudson.slaves.JNLPLauncher boolean
+new hudson.slaves.DumbSlave java.lang.String java.lang.String hudson.slaves.ComputerLauncher
+method jenkins.model.Jenkins addNode hudson.model.Node
+method jenkins.model.Jenkins getNode java.lang.String
+method hudson.model.Node toComputer
+method hudson.slaves.SlaveComputer getJnlpMac
 ```
+
+---
+
+## 10. Set Up Webhook (Optional)
+
+For automatic deployment on git push:
+
+1. **GitHub → Repo → Settings → Webhooks → Add webhook**
+   - Payload URL: `http://JENKINS-IP:8080/github-webhook/`
+   - Content type: `application/json`
+   - Events: Just the push event
+
+2. **Jenkins → Pipeline → Build Triggers**
+   - ☑️ GitHub hook trigger for GITScm polling
+
+---
 
 ## Troubleshooting
 
 ### Container Won't Start
+
 ```bash
 docker compose logs jenkins
 ```
 
 ### Permission Denied
+
 ```bash
 # Check permissions
 ls -la /opt/homelab/
 ls -la /var/run/docker.sock
 
-# Docker socket permission
-sudo chmod 666 /var/run/docker.sock  # Temporary
+# Temporarily fix Docker socket
+sudo chmod 666 /var/run/docker.sock
 ```
 
 ### Docker Commands Don't Work in Pipeline
+
 ```bash
 # Test inside Jenkins container
 docker exec -it jenkins bash
 docker ps
 docker compose version
+```
+
+### Workspace Issues
+
+Workspace path must be identical (inside = outside):
+
+```yaml
+volumes:
+  - /opt/homelab/workspace:/opt/homelab/workspace
 ```
