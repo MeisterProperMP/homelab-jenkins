@@ -214,8 +214,7 @@ Force Reinstall:  ${env.FORCE_REINSTALL_FLAG}
                         def agentExists = (agentExistsCheck == "EXISTS")
                         
                         if (agentExists && !forceReinstall) {
-                            echo "⚠️ Agent already installed at ${env.INSTALL_PATH}"
-                            echo "   Use FORCE_REINSTALL=true to reinstall"
+                            echo "ℹ️ Agent already installed at ${env.INSTALL_PATH}"
                             
                             // Check if agent is running
                             def agentRunning = sh(
@@ -229,8 +228,18 @@ Force Reinstall:  ${env.FORCE_REINSTALL_FLAG}
                             
                             if (agentRunning == "RUNNING") {
                                 echo "✅ Agent is already running!"
-                                currentBuild.result = 'SUCCESS'
-                                return
+                                env.AGENT_RUNNING = "true"
+                            } else {
+                                echo "⚠️ Agent is installed but NOT running - will restart it"
+                                env.AGENT_RUNNING = "false"
+                                
+                                // Start the existing agent
+                                sh '''
+                                    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                                        -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
+                                        "cd ${INSTALL_PATH} && docker compose up -d --build"
+                                '''
+                                echo "🚀 Agent restarted!"
                             }
                         }
                         
