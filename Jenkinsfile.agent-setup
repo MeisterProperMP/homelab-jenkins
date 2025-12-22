@@ -349,11 +349,11 @@ DOCKER_GID=${env.DOCKER_GID_PARAM}
                         keyFileVariable: 'SSH_KEY_FILE',
                         usernameVariable: 'SSH_USERNAME'
                     )]) {
-                        // Create installation directory and deployment directory
+                        // Create installation directory and deployment directory (requires sudo for /home)
                         sh '''
                             ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                                 -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
-                                "mkdir -p ${INSTALL_PATH} && mkdir -p /home/jenkins-agent"
+                                "sudo mkdir -p ${INSTALL_PATH} && sudo chown \$USER:\$USER ${INSTALL_PATH} && sudo mkdir -p /home/jenkins-agent && sudo chown \$USER:\$USER /home/jenkins-agent"
                         '''
                         
                         // Stop existing agent if running
