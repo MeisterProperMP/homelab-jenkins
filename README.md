@@ -171,43 +171,30 @@ method hudson.slaves.SlaveComputer getJnlpMac
 The VM must be provisioned with:
 - ✅ SSH access configured (e.g., via Terraform)
 - ✅ Docker and Docker Compose installed
-- ✅ Your SSH public key already in `~/.ssh/authorized_keys`
+- ✅ User is member of `docker` group (`sudo usermod -aG docker $USER`)
+- ✅ Passwordless sudo configured (for creating directories in `/opt` and `/home`)
+- ✅ Your SSH public key in `~/.ssh/authorized_keys`
 
-#### Step 1: Prepare the Target VM
-
-SSH into the new VM and run these commands:
+#### Step 1: Prepare the Target VM (if not done by Terraform)
 
 ```bash
-# 1. Add your user to the docker group
+# Add user to docker group
 sudo usermod -aG docker $USER
 
-# 2. Create the agent installation directory
-sudo mkdir -p /opt/jenkins-agent
-sudo chown $USER:$USER /opt/jenkins-agent
-
-# 3. Check Docker group GID (note this for the Jenkins job)
+# Get Docker group GID (note this for Jenkins job)
 getent group docker
-# Example output: docker:x:988:  → GID is 988
+# Example: docker:x:988:  → GID is 988
 
-# 4. Log out and back in (for docker group to take effect)
+# Log out and back in for group change to take effect
 exit
-```
-
-**Quick one-liner:**
-
-```bash
-ssh Robin@NEW_VM_IP 'sudo usermod -aG docker $USER && sudo mkdir -p /opt/jenkins-agent && sudo chown $USER:$USER /opt/jenkins-agent && getent group docker'
 ```
 
 #### Step 2: Verify Access
 
-From your local machine, test the connection:
-
 ```bash
-ssh -i ~/.ssh/jenkins_agent_key Robin@NEW_VM_IP 'echo OK && docker ps'
+ssh Robin@NEW_VM_IP 'docker ps && sudo whoami'
+# Should show containers list and "root" (without password prompt)
 ```
-
-Both commands should succeed without password prompts.
 
 #### Step 3: Run the Agent Setup Job
 
@@ -243,14 +230,20 @@ ssh Robin@NEW_VM_IP 'cd /opt/jenkins-agent && docker compose logs -f'
 
 The `Jenkinsfile.agent-setup` pipeline:
 
-1. ✅ Validates parameters and SSH connectivity
-2. ✅ Checks Docker installation on target VM
-3. ✅ Registers the agent node in Jenkins (with IP as label)
-4. ✅ Retrieves the agent secret automatically
-5. ✅ Deploys Dockerfile and docker-compose.yaml to the VM
-6. ✅ Builds and starts the agent container
-7. ✅ Waits for the agent to connect
-8. ✅ Verifies the connection
+| Stage | Description |
+|-------|-------------|
+| **Validate** | Validates parameters |
+| **Check VM** | Tests SSH + Docker, checks if agent exists/running |
+| **Start Existing Agent** | If agent exists but stopped → restart it |
+| **Register Node** | Creates Jenkins node (if new install) |
+| **Deploy & Start** | Copies files, creates directories, starts container |
+| **Verify** | Confirms agent is online |
+
+**Scenarios:**
+- Agent running → ✅ Nothing to do
+- Agent stopped → 🚀 Restart only
+- New install → 📦 Full setup
+- `FORCE_REINSTALL=true` → 🔄 Complete reinstall
 
 ---
 
@@ -291,19 +284,14 @@ ssh Robin@VM_IP 'cd /opt/jenkins-agent && docker compose logs --tail=100'
 
 #### Reinstalling an Agent
 
-If you need to reinstall, run the job with:
-- `FORCE_REINSTALL` = ☑️ `true`
-
-This will:
+Run the job with `FORCE_REINSTALL` = ☑️ `true`. This will:
 - Remove and recreate the Jenkins node
 - Generate a new secret
 - Redeploy the agent container
 
----
+#### Restarting a Stopped Agent
 
-### Manual Setup (Alternative)
-
-If you prefer manual setup, see the `jenkins-agent/README.md` for step-by-step instructions.
+Just run the pipeline again - it detects stopped agents and restarts them automatically.
 
 ---
 

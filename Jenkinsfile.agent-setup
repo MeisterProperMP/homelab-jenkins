@@ -6,7 +6,8 @@
  * Prerequisites:
  * 1. SSH credentials in Jenkins (Kind: "SSH Username with private key")
  * 2. Target VM has Docker and Docker Compose installed
- * 3. Jenkins master reachable from target VM on ports 8080 and 50000
+ * 3. Target VM user has passwordless sudo (for mkdir/chown in /opt and /home)
+ * 4. Jenkins master reachable from target VM on ports 8080 and 50000
  */
 
 // Helper function: Wait for agent to connect to Jenkins
