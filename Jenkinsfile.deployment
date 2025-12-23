@@ -9,18 +9,18 @@ pipeline {
 
     environment {
         COMPOSE_PROJECT_PREFIX = 'homelab'
+        DEPLOYMENT_BASE = '/home/jenkins-agent/deployments'
     }
 
     parameters {
-        booleanParam(
-            name: 'FORCE_RECREATE',
-            defaultValue: false,
-            description: 'Recreate containers even if there are no changes'
-        )
-        booleanParam(
-            name: 'PRUNE',
-            defaultValue: false,
-            description: 'Remove services that no longer exist in the repository'
+        choice(
+            name: 'DEPLOY_MODE',
+            choices: ['DEPLOY', 'START_MISSING', 'RESTART_ALL', 'CLEAN_DEPLOY'],
+            description: '''Deployment mode:
+• START_MISSING: Only start containers that are not running (no file changes)
+• RESTART_ALL: Restart all containers (no file changes)
+• DEPLOY: Copy configs from Git and restart services (keeps persistence/)
+• CLEAN_DEPLOY: Delete everything including persistence/ and redeploy from scratch'''
         )
         string(
             name: 'DEPLOY_ONLY_VM',
@@ -31,6 +31,11 @@ pipeline {
             name: 'DEPLOY_ONLY_SERVICE',
             defaultValue: '',
             description: 'Deploy only specific services (comma-separated, e.g. "traefik,portainer"). Empty = all'
+        )
+        booleanParam(
+            name: 'PRUNE',
+            defaultValue: false,
+            description: 'Remove services that no longer exist in the repository'
         )
     }
 
@@ -45,6 +50,7 @@ pipeline {
                         returnStdout: true
                     ).trim()
                     echo "Building commit: ${env.GIT_COMMIT_SHORT}"
+                    echo "Deploy mode: ${params.DEPLOY_MODE}"
 
                     // Find all IP directories (pattern: X.X.X.X)
                     def vmDirsRaw = sh(
@@ -80,7 +86,7 @@ pipeline {
                     def vmDirs = env.VM_DIRS.split('\n')
                     def deployOnlyVm = params.DEPLOY_ONLY_VM?.trim()
                     def deployOnlyService = params.DEPLOY_ONLY_SERVICE?.trim()
-                    def forceRecreate = params.FORCE_RECREATE
+                    def deployMode = params.DEPLOY_MODE
                     def prune = params.PRUNE
 
                     // Filter VMs if specified
@@ -99,30 +105,58 @@ pipeline {
                     vmDirs.each { vmIp ->
                         stage("Deploy to ${vmIp}") {
                             node(vmIp) {
-                                checkout scm
+                                def vmDeploymentPath = "${env.DEPLOYMENT_BASE}/${vmIp}"
+                                
+                                // For DEPLOY and CLEAN_DEPLOY modes, we need the git checkout
+                                if (deployMode in ['DEPLOY', 'CLEAN_DEPLOY']) {
+                                    // Clean workspace from root-owned files/directories
+                                    sh '''
+                                        find . -mindepth 1 -user root -delete 2>/dev/null || true
+                                        find . -mindepth 1 -type d -empty -delete 2>/dev/null || true
+                                    '''
+                                    
+                                    checkout scm
+                                }
 
-                                // Find services for this VM in the repo
-                                def servicesRaw = sh(
-                                    script: """
-                                        find ./${vmIp} -maxdepth 2 \\( -name "docker-compose.yaml" -o -name "docker-compose.yml" \\) | \
-                                        sed 's|^./||' | \
-                                        sed 's|/docker-compose.ya\\?ml\$||' | \
-                                        sed 's|^${vmIp}/||' | \
-                                        sort
-                                    """,
-                                    returnStdout: true
-                                ).trim()
-
-                                def repoServices = servicesRaw ? servicesRaw.split('\n').toList() : []
+                                // Get list of services based on mode
+                                def repoServices = []
+                                
+                                if (deployMode in ['DEPLOY', 'CLEAN_DEPLOY']) {
+                                    // Find services from git checkout
+                                    def servicesRaw = sh(
+                                        script: """
+                                            find ./${vmIp} -maxdepth 2 -type f \\( -name "docker-compose.yaml" -o -name "docker-compose.yml" \\) | \
+                                            sed 's|^\\./||' | \
+                                            sed 's|^${vmIp}/||' | \
+                                            sed 's|/docker-compose.ya\\?ml\$||' | \
+                                            sort
+                                        """,
+                                        returnStdout: true
+                                    ).trim()
+                                    repoServices = servicesRaw ? servicesRaw.split('\n').toList() : []
+                                } else {
+                                    // For START_MISSING and RESTART_ALL, find services from deployment directory
+                                    def servicesRaw = sh(
+                                        script: """
+                                            if [ -d "${vmDeploymentPath}" ]; then
+                                                find ${vmDeploymentPath} -maxdepth 2 -type f \\( -name "docker-compose.yaml" -o -name "docker-compose.yml" \\) | \
+                                                sed 's|${vmDeploymentPath}/||' | \
+                                                sed 's|/docker-compose.ya\\?ml\$||' | \
+                                                sort
+                                            fi
+                                        """,
+                                        returnStdout: true
+                                    ).trim()
+                                    repoServices = servicesRaw ? servicesRaw.split('\n').toList() : []
+                                }
 
                                 echo "\n=========================================="
-                                echo "VM: ${vmIp}"
+                                echo "VM: ${vmIp} | Mode: ${deployMode}"
                                 echo "==========================================\n"
-                                echo "📦 Services in repo: ${repoServices.join(', ') ?: 'none'}"
+                                echo "📦 Services found: ${repoServices.join(', ') ?: 'none'}"
 
                                 // Prune: Find and remove services no longer in repo
-                                if (prune && !deployOnlyService) {
-                                    // Find running homelab services on this VM
+                                if (prune && !deployOnlyService && deployMode in ['DEPLOY', 'CLEAN_DEPLOY']) {
                                     def runningRaw = sh(
                                         script: """
                                             docker compose ls --format json 2>/dev/null | \
@@ -135,25 +169,14 @@ pipeline {
                                     ).trim()
 
                                     def runningServices = runningRaw ? runningRaw.split('\n').toList() : []
-                                    echo "🐳 Running services: ${runningServices.join(', ') ?: 'none'}"
-
-                                    // Find services to remove (running but not in repo)
-                                    def toRemove = runningServices.findAll { running ->
-                                        !repoServices.contains(running)
-                                    }
+                                    def toRemove = runningServices.findAll { !repoServices.contains(it) }
 
                                     if (toRemove.size() > 0) {
                                         echo "\n🗑️ Pruning removed services: ${toRemove.join(', ')}"
-                                        
                                         toRemove.each { serviceName ->
                                             def projectName = "${env.COMPOSE_PROJECT_PREFIX}-${serviceName}"
-                                            
-                                            echo "\n--- Removing: ${serviceName} ---"
-                                            
                                             try {
-                                                sh """
-                                                    docker compose -p ${projectName} down --remove-orphans --volumes || true
-                                                """
+                                                sh "docker compose -p ${projectName} down --remove-orphans --volumes || true"
                                                 echo "✅ ${serviceName} removed"
                                                 removedServices.add("${vmIp}/${serviceName}")
                                             } catch (Exception e) {
@@ -181,84 +204,135 @@ pipeline {
                                     return
                                 }
 
-                                echo "\n🚀 Deploying: ${servicesToDeploy.join(', ')}"
+                                echo "\n🚀 Processing: ${servicesToDeploy.join(', ')}"
 
-                                // Deploy each service
+                                // Process each service
                                 servicesToDeploy.each { serviceName ->
-                                    def servicePath = "${vmIp}/${serviceName}"
-                                    def composeFile = fileExists("${servicePath}/docker-compose.yaml") ?
-                                        "${servicePath}/docker-compose.yaml" : "${servicePath}/docker-compose.yml"
+                                    def servicePath = "${vmDeploymentPath}/${serviceName}"
                                     def projectName = "${env.COMPOSE_PROJECT_PREFIX}-${serviceName}"
 
-                                    echo "\n--- Deploying: ${serviceName} ---"
+                                    echo "\n--- ${serviceName} ---"
 
                                     try {
-                                        // Copy .env file if present
-                                        if (fileExists("${servicePath}/.env.example") && !fileExists("${servicePath}/.env")) {
-                                            sh "cp ${servicePath}/.env.example ${servicePath}/.env"
-                                            echo "📋 Copied .env.example to .env"
+                                        // Handle file operations based on mode
+                                        if (deployMode == 'CLEAN_DEPLOY') {
+                                            // Delete everything including persistence
+                                            echo "🧹 Clean deploy: Removing all data including persistence/"
+                                            sh """
+                                                rm -rf ${servicePath} 2>/dev/null || true
+                                                mkdir -p ${servicePath}
+                                                cd ./${vmIp}/${serviceName} && tar --exclude='*@tmp' -cf - . | (cd ${servicePath} && tar -xf -)
+                                            """
+                                        } else if (deployMode == 'DEPLOY') {
+                                            // Copy files - tar overwrites but doesn't delete, so persistence/ stays
+                                            echo "📦 Deploy: Updating configs (persistence/ stays untouched)"
+                                            sh """
+                                                mkdir -p ${servicePath}
+                                                cd ./${vmIp}/${serviceName} && tar --exclude='*@tmp' -cf - . | (cd ${servicePath} && tar -xf -)
+                                            """
+                                        }
+                                        // For START_MISSING and RESTART_ALL, no file operations
+
+                                        // Docker operations
+                                        dir(servicePath) {
+                                            // Copy .env file if present
+                                            if (fileExists(".env.example") && !fileExists(".env")) {
+                                                sh "cp .env.example .env"
+                                                echo "📋 Copied .env.example to .env"
+                                            }
+
+                                            def composeCmd = "docker compose -p ${projectName}"
+                                            
+                                            // Validate compose file
+                                            def validateResult = sh(
+                                                script: "${composeCmd} config --quiet",
+                                                returnStatus: true
+                                            )
+                                            
+                                            if (validateResult != 0) {
+                                                echo "❌ ${serviceName}: Invalid compose file"
+                                                allResults["${vmIp}/${serviceName}"] = 'FAILED'
+                                                return
+                                            }
+
+                                            if (deployMode == 'START_MISSING') {
+                                                // Only start if not running
+                                                def isRunning = sh(
+                                                    script: "${composeCmd} ps -q 2>/dev/null | head -1",
+                                                    returnStdout: true
+                                                ).trim()
+                                                
+                                                if (isRunning) {
+                                                    echo "⏭️ ${serviceName} already running, skipping"
+                                                    allResults["${vmIp}/${serviceName}"] = 'SKIPPED'
+                                                    return
+                                                }
+                                                
+                                                echo "▶️ Starting ${serviceName}..."
+                                                sh "${composeCmd} up -d"
+                                                
+                                            } else if (deployMode == 'RESTART_ALL') {
+                                                // Restart all containers
+                                                echo "🔄 Restarting ${serviceName}..."
+                                                sh "${composeCmd} restart || ${composeCmd} up -d"
+                                                
+                                            } else {
+                                                // DEPLOY or CLEAN_DEPLOY - full deployment
+                                                echo "🚀 Deploying ${serviceName}..."
+                                                sh "${composeCmd} pull --ignore-pull-failures || true"
+                                                sh "${composeCmd} down --remove-orphans || true"
+                                                sh "${composeCmd} up -d --pull always --remove-orphans"
+                                            }
+
+                                            // Show status
+                                            sh "${composeCmd} ps"
                                         }
 
-                                        // Validate compose file
-                                        def validateResult = sh(
-                                            script: "docker compose -f ${composeFile} config --quiet",
-                                            returnStatus: true
-                                        )
-                                        
-                                        if (validateResult != 0) {
-                                            echo "❌ ${serviceName}: Invalid compose file"
-                                            allResults[servicePath] = 'FAILED'
-                                            return
-                                        }
-
-                                        // Docker Compose commands
-                                        def composeCmd = "docker compose -f ${composeFile} -p ${projectName}"
-                                        def upFlags = "-d --pull always --remove-orphans"
-                                        
-                                        if (forceRecreate) {
-                                            upFlags += " --force-recreate"
-                                        }
-
-                                        // Pull images
-                                        sh "${composeCmd} pull --ignore-pull-failures || true"
-
-                                        // Start service
-                                        sh "${composeCmd} up ${upFlags}"
-
-                                        // Show status
-                                        sh "${composeCmd} ps"
-
-                                        echo "✅ ${serviceName} deployed successfully"
-                                        allResults[servicePath] = 'SUCCESS'
+                                        echo "✅ ${serviceName} completed"
+                                        allResults["${vmIp}/${serviceName}"] = 'SUCCESS'
 
                                     } catch (Exception e) {
-                                        echo "❌ ${serviceName} deployment failed: ${e.message}"
-                                        allResults[servicePath] = 'FAILED'
+                                        echo "❌ ${serviceName} failed: ${e.message}"
+                                        allResults["${vmIp}/${serviceName}"] = 'FAILED'
                                         currentBuild.result = 'UNSTABLE'
                                     }
                                 }
 
-                                // Cleanup unused Docker resources on this VM
-                                echo "\nCleaning up unused Docker resources..."
-                                sh '''
-                                    docker image prune -f --filter "until=168h" || true
-                                    docker volume prune -f --filter "label!=keep" || true
-                                    docker network prune -f || true
-                                '''
+                                // Cleanup @tmp directories created by Jenkins dir() step
+                                sh """
+                                    find ${vmDeploymentPath} -maxdepth 1 -type d -name '*@tmp' -exec rm -rf {} + 2>/dev/null || true
+                                """
+
+                                // Cleanup unused Docker resources
+                                if (deployMode in ['DEPLOY', 'CLEAN_DEPLOY']) {
+                                    echo "\nCleaning up unused Docker resources..."
+                                    sh '''
+                                        docker image prune -f --filter "until=168h" || true
+                                        docker network prune -f || true
+                                    '''
+                                }
                             }
                         }
                     }
 
                     // Final Summary
                     echo "\n=========================================="
-                    echo "DEPLOYMENT SUMMARY"
+                    echo "DEPLOYMENT SUMMARY (Mode: ${deployMode})"
                     echo "==========================================\n"
                     
                     def successful = allResults.findAll { it.value == 'SUCCESS' }
+                    def skipped = allResults.findAll { it.value == 'SKIPPED' }
                     def failed = allResults.findAll { it.value == 'FAILED' }
 
-                    echo "✅ Deployed (${successful.size()}):"
-                    successful.each { key, value -> echo "   - ${key}" }
+                    if (successful.size() > 0) {
+                        echo "✅ Success (${successful.size()}):"
+                        successful.each { key, value -> echo "   - ${key}" }
+                    }
+
+                    if (skipped.size() > 0) {
+                        echo "\n⏭️ Skipped (${skipped.size()}):"
+                        skipped.each { key, value -> echo "   - ${key}" }
+                    }
 
                     if (removedServices.size() > 0) {
                         echo "\n🗑️ Pruned (${removedServices.size()}):"
@@ -268,7 +342,7 @@ pipeline {
                     if (failed.size() > 0) {
                         echo "\n❌ Failed (${failed.size()}):"
                         failed.each { key, value -> echo "   - ${key}" }
-                        unstable("Some services could not be deployed")
+                        unstable("Some services failed")
                     }
                 }
             }

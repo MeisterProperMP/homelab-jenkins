@@ -323,11 +323,12 @@ DOCKER_GID=${env.DOCKER_GID_PARAM}
                         usernameVariable: 'SSH_USERNAME'
                     )]) {
                         // Create directories
+                        // Note: /home/jenkins-agent needs UID 1000 (jenkins user in container)
                         echo "📁 Creating directories..."
                         sh '''
                             ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                                 -i "$SSH_KEY_FILE" "${SSH_USER_PARAM}@${TARGET_VM}" \
-                                "sudo mkdir -p ${INSTALL_PATH} /home/jenkins-agent && sudo chown ${SSH_USER_PARAM}:${SSH_USER_PARAM} ${INSTALL_PATH} /home/jenkins-agent"
+                                "sudo mkdir -p ${INSTALL_PATH} /home/jenkins-agent && sudo chown ${SSH_USER_PARAM}:${SSH_USER_PARAM} ${INSTALL_PATH} && sudo chown 1000:1000 /home/jenkins-agent"
                         '''
                         
                         // Stop existing agent
