@@ -22,7 +22,12 @@ RUN apt-get update && apt-get install -y \
 RUN apt-get update && apt-get install -y \
     git \
     jq \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
+
+# Allow jenkins user to use sudo without password
+RUN echo "jenkins ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/jenkins \
+    && chmod 0440 /etc/sudoers.d/jenkins
 
 USER jenkins
 
